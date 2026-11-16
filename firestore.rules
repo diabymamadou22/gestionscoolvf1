@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Refus strict par défaut (Global Safety Net)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Valide le format et la longueur des codes d'établissements scolaires
+    function isValidSchoolCode(code) {
+      return code is string && code.size() >= 2 && code.size() <= 64 && code.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Valide le format des identifiants de documents
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Répertoire des établissements scolaires enregistrés
+    match /school_directory/{schoolCode} {
+      allow read, write: if isValidSchoolCode(schoolCode);
+    }
+
+    // Configuration de l'établissement (/schools/{schoolCode}/settings/config)
+    match /schools/{schoolCode}/settings/{docId} {
+      allow read: if isValidSchoolCode(schoolCode);
+      allow write: if isValidSchoolCode(schoolCode) && isValidId(docId);
+    }
+
+    // Sous-collections isolées par établissement
+    match /schools/{schoolCode}/{collectionName}/{docId} {
+      allow read: if isValidSchoolCode(schoolCode) && collectionName in [
+        'users',
+        'students',
+        'classes',
+        'subjects',
+        'teachers',
+        'grades',
+        'payments',
+        'expenses',
+        'cash_closures',
+        'attendance',
+        'exam_sessions',
+        'exam_slots',
+        'audit_logs',
+        'active_sessions'
+      ];
+      allow write: if isValidSchoolCode(schoolCode) && isValidId(docId) && collectionName in [
+        'users',
+        'students',
+        'classes',
+        'subjects',
+        'teachers',
+        'grades',
+        'payments',
+        'expenses',
+        'cash_closures',
+        'attendance',
+        'exam_sessions',
+        'exam_slots',
+        'audit_logs',
+        'active_sessions'
+      ];
+    }
+
+    // Historique des scans QR
+    match /scan_history/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+  }
+}

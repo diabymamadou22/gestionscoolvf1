@@ -1,0 +1,302 @@
+/**
+ * SomaSikolo / KalanGest - Sidebar Navigation Component
+ * Aesthetic: Modern Dashboard Layout with Responsive Mobile Drawer and Desktop Collapsible View
+ */
+
+import React, { useState } from 'react';
+import { 
+  LayoutDashboard, 
+  Users, 
+  GraduationCap, 
+  BookOpen, 
+  Briefcase, 
+  ClipboardList, 
+  FileText, 
+  CreditCard, 
+  QrCode, 
+  Settings, 
+  Building2,
+  CalendarCheck,
+  UserPlus,
+  X,
+  ChevronRight,
+  Shield,
+  Sliders,
+  Wallet,
+  CalendarDays
+} from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
+import { useSchool } from '../../contexts/SchoolContext';
+import { AuthService } from '../../services/authService';
+import { PwaInstallModal } from '../common/PwaInstallModal';
+
+export type NavTab = 
+  | 'dashboard'
+  | 'inscription'
+  | 'students'
+  | 'classes'
+  | 'subjects'
+  | 'teachers'
+  | 'grades'
+  | 'attendance'
+  | 'examSchedule'
+  | 'bulletins'
+  | 'cards'
+  | 'payments'
+  | 'cashier'
+  | 'modules'
+  | 'settings'
+  | 'backup';
+
+export interface SidebarProps {
+  activeTab: NavTab;
+  setActiveTab: (tab: NavTab) => void;
+  isCollapsed: boolean;
+  setIsCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
+  isMobileOpen: boolean;
+  setIsMobileOpen: (open: boolean) => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ 
+  activeTab, 
+  setActiveTab,
+  isCollapsed,
+  setIsCollapsed,
+  isMobileOpen,
+  setIsMobileOpen
+}) => {
+  const { currentUser, canAccessTab } = useAuth();
+  const { settings, isFeatureEnabled } = useSchool();
+  const [showPwaModal, setShowPwaModal] = useState(false);
+
+  const featureMap: Record<NavTab, keyof import('../../types').SchoolEnabledFeatures | null> = {
+    dashboard: null,
+    inscription: 'students',
+    students: 'students',
+    classes: 'classes',
+    subjects: 'subjects',
+    teachers: 'teachers',
+    grades: 'grades',
+    attendance: 'attendance',
+    examSchedule: 'examSchedule',
+    bulletins: 'bulletins',
+    cards: 'cards',
+    payments: 'payments',
+    cashier: 'payments',
+    modules: null,
+    settings: null,
+    backup: null
+  };
+
+  const navSections = [
+    {
+      title: 'Général',
+      items: [
+        { id: 'dashboard' as NavTab, label: 'Tableau de bord', icon: LayoutDashboard, perm: 'dashboard:view' },
+        { id: 'inscription' as NavTab, label: 'Inscription', icon: UserPlus, perm: 'students:create' },
+      ]
+    },
+    {
+      title: 'Scolarité',
+      items: [
+        { id: 'students' as NavTab, label: 'Élèves', icon: Users, perm: 'students:view' },
+        { id: 'classes' as NavTab, label: 'Classes', icon: GraduationCap, perm: 'classes:view' },
+        { id: 'subjects' as NavTab, label: 'Matières', icon: BookOpen, perm: 'subjects:view' },
+        { id: 'teachers' as NavTab, label: 'Enseignants', icon: Briefcase, perm: 'teachers:view' },
+      ]
+    },
+    {
+      title: 'Évaluations & Vie Scolaire',
+      items: [
+        { id: 'grades' as NavTab, label: 'Notes', icon: ClipboardList, perm: 'grades:view' },
+        { id: 'attendance' as NavTab, label: 'Présences', icon: CalendarCheck, perm: 'attendance:view' },
+        { id: 'examSchedule' as NavTab, label: 'Plannings Examens', icon: CalendarDays, perm: 'bulletins:generate' },
+        { id: 'bulletins' as NavTab, label: 'Bulletins', icon: FileText, perm: 'bulletins:view' },
+        { id: 'cards' as NavTab, label: 'Cartes & Badges', icon: QrCode, perm: 'cards:generate' },
+      ]
+    },
+    {
+      title: 'Administration',
+      items: [
+        { id: 'payments' as NavTab, label: 'Paiements', icon: CreditCard, perm: 'payments:view' },
+        { id: 'cashier' as NavTab, label: 'Caisse', icon: Wallet, perm: 'payments:view' },
+        { id: 'settings' as NavTab, label: 'Paramètres', icon: Settings, perm: 'settings:view' },
+      ]
+    }
+  ].map(sec => ({
+    ...sec,
+    items: sec.items.filter(item => {
+      if (!canAccessTab(item.id)) return false;
+      const featKey = featureMap[item.id];
+      if (!featKey) return true;
+      return isFeatureEnabled(featKey);
+    })
+  })).filter(sec => sec.items.length > 0);
+
+  const handleSelectTab = (tab: NavTab) => {
+    setActiveTab(tab);
+    if (isMobileOpen) {
+      setIsMobileOpen(false);
+    }
+  };
+
+  return (
+    <>
+      {/* MOBILE BACKDROP OVERLAY */}
+      {isMobileOpen && (
+        <div 
+          onClick={() => setIsMobileOpen(false)}
+          className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs z-40 lg:hidden transition-opacity duration-300"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* SIDEBAR ASIDE ELEMENT */}
+      <aside 
+        className={`no-print bg-white border-r border-slate-200 flex flex-col h-dvh select-none shadow-[4px_0_24px_rgba(0,0,0,0.03)] z-50 transition-all duration-300 ease-in-out
+          /* Mobile Drawer Position */
+          fixed lg:static top-0 bottom-0 left-0
+          ${isMobileOpen ? 'translate-x-0 w-72 sm:w-80 max-w-[85vw]' : '-translate-x-full lg:translate-x-0'}
+          /* Desktop Width (Expanded vs Collapsed) */
+          ${isCollapsed ? 'lg:w-18 xl:w-20' : 'lg:w-60 xl:w-64'}
+        `}
+      >
+        {/* Brand Header */}
+        <div className={`p-4 sm:p-5 flex items-center border-b border-slate-100 ${isCollapsed ? 'lg:justify-center lg:px-2' : 'justify-between'}`}>
+          <div className="flex items-center gap-3 min-w-0">
+            {settings.logoUrl ? (
+              <div className="w-10 h-10 rounded-xl overflow-hidden border border-slate-200 bg-white p-0.5 shadow-xs shrink-0 flex items-center justify-center">
+                <img src={settings.logoUrl} alt="Logo Établissement" className="w-full h-full object-contain" />
+              </div>
+            ) : (
+              <div className="w-10 h-10 bg-blue-900 rounded-xl flex items-center justify-center shadow-md shadow-blue-900/20 shrink-0">
+                <Building2 className="w-5 h-5 text-white" />
+              </div>
+            )}
+            
+            {/* Title & Subtitle (hidden when collapsed on desktop) */}
+            <div className={`flex flex-col min-w-0 ${isCollapsed ? 'lg:hidden' : 'flex-1'}`}>
+              <span className="font-black text-xl tracking-tighter text-blue-950 uppercase truncate">
+                KalanGest
+              </span>
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 truncate">
+                Mali • {settings.schoolName}
+              </span>
+            </div>
+          </div>
+
+          {/* Close button on mobile */}
+          <button
+            type="button"
+            onClick={() => setIsMobileOpen(false)}
+            className="p-2 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-xl lg:hidden transition-colors cursor-pointer"
+            title="Fermer le menu"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Navigation Menu */}
+        <nav className={`flex-1 ${isCollapsed ? 'lg:overflow-visible' : 'overflow-y-auto'} overflow-y-auto px-3 space-y-4 custom-scrollbar py-3`}>
+          {navSections.map((sec, secIdx) => (
+            <div key={sec.title || secIdx} className="space-y-1">
+              {!isCollapsed && sec.title && (
+                <div className="px-3 pt-1 pb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  {sec.title}
+                </div>
+              )}
+              {isCollapsed && secIdx > 0 && (
+                <div className="my-2 border-t border-slate-100 mx-2" />
+              )}
+              <div className="space-y-1">
+                {sec.items.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.id;
+                  return (
+                    <div key={item.id} className="relative group">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectTab(item.id)}
+                        title={isCollapsed ? `${item.label} (${sec.title})` : undefined}
+                        className={`w-full flex items-center rounded-xl text-xs transition-all cursor-pointer ${
+                          isCollapsed 
+                            ? 'justify-center p-2.5' 
+                            : 'gap-3 px-3 py-2.5'
+                        } ${
+                          isActive
+                            ? 'bg-slate-900 text-white shadow-sm font-bold'
+                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium'
+                        }`}
+                      >
+                        <div className="relative shrink-0 flex items-center justify-center">
+                          <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-500 group-hover:text-slate-800'}`} />
+                          {isActive && isCollapsed && (
+                            <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-blue-500 ring-2 ring-white" />
+                          )}
+                        </div>
+
+                        {/* Label (hidden in collapsed desktop mode) */}
+                        <span className={`truncate tracking-tight ${isCollapsed ? 'lg:hidden' : 'block'}`}>
+                          {item.label}
+                        </span>
+
+                        {/* Active subtle indicator when expanded */}
+                        {isActive && !isCollapsed && (
+                          <div className="ml-auto w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                        )}
+                      </button>
+
+                      {/* Floating Tooltip in Collapsed Desktop Mode */}
+                      {isCollapsed && (
+                        <div className="hidden lg:group-hover:flex absolute left-full top-1/2 -translate-y-1/2 ml-3.5 z-50 px-3 py-1.5 bg-slate-900 text-white text-xs font-semibold rounded-xl shadow-xl whitespace-nowrap items-center gap-2 pointer-events-none animate-in fade-in duration-150 border border-slate-800">
+                          <span className="font-bold text-white">{item.label}</span>
+                          {sec.title && (
+                            <span className="text-[10px] text-slate-400 font-normal uppercase tracking-wider">
+                              · {sec.title}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        {/* Bottom Section: Active User Footer & Role Switcher */}
+        <div className={`border-t border-slate-100 ${isCollapsed ? 'p-2' : 'm-2.5 p-3 rounded-xl bg-slate-50/70 border border-slate-200/80'}`}>
+          {isCollapsed ? (
+            /* Collapsed Desktop View for User Profile */
+            <div className="hidden lg:flex flex-col items-center py-1">
+              <div 
+                className="w-9 h-9 rounded-xl bg-slate-900 text-white font-bold text-xs flex items-center justify-center shadow-2xs cursor-default"
+                title={`${currentUser?.fullName} (${AuthService.getRoleLabel(currentUser?.role || 'ADMIN')})`}
+              >
+                {currentUser?.fullName.charAt(0)}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-slate-900 text-white font-bold text-xs flex items-center justify-center shrink-0">
+                {currentUser?.fullName?.charAt(0) || 'A'}
+              </div>
+              <div className="flex flex-col min-w-0 flex-1">
+                <span className="text-xs font-bold text-slate-900 truncate">
+                  {currentUser?.fullName}
+                </span>
+                <span className="text-[10px] font-medium text-slate-500 truncate">
+                  {AuthService.getRoleLabel(currentUser?.role || 'ADMIN')}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* PWA Install Modal */}
+        <PwaInstallModal isOpen={showPwaModal} onClose={() => setShowPwaModal(false)} />
+      </aside>
+    </>
+  );
+};

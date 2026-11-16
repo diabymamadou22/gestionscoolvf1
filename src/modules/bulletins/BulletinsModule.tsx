@@ -1,0 +1,1179 @@
+/**
+ * SomaSikolo - Bulletins de Notes Officiels (Mali) Module
+ * Saisie directe des notes dans le bulletin & Impression directe A4 / PDF
+ */
+
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  FileText,
+  Printer, 
+  CheckCircle2, 
+  Search, 
+  X, 
+  FileSpreadsheet, 
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight
+} from 'lucide-react';
+import { useSchool } from '../../contexts/SchoolContext';
+import { useAuth } from '../../contexts/AuthContext';
+import { ReportCard, StudentSubjectAverage, EvaluationGrade, EvaluationTerm } from '../../types';
+import { PdfService } from '../../services/pdfService';
+import { getMaliScoreAppreciation, getTermLabel, getMaliEvaluationTerms, getFilteredEvaluationTerms, getRelatedTermsForPeriod } from '../../constants/maliEducation';
+
+export const BulletinsModule: React.FC = () => {
+  const { students, classes, subjects, grades, saveGrade, deleteGrade, generateReportCard, settings } = useSchool();
+  const { hasPermission } = useAuth();
+  const canEditGrades = hasPermission('grades:entry');
+
+  // Classes filtrées selon le type d'établissement configuré
+  const availableClasses = useMemo(() => {
+    if (settings.schoolCategory === 'ECOLE_FONDAMENTALE') {
+      return classes.filter(c => c.category === 'FONDAMENTAL_1' || c.category === 'FONDAMENTAL_2');
+    }
+    if (settings.schoolCategory === 'LYCEE') {
+      return classes.filter(c => c.category === 'LYCEE');
+    }
+    if (settings.schoolCategory === 'PROFESSIONNEL') {
+      return classes.filter(c => c.category === 'TECHNIQUE_BT' || c.category === 'PROFESSIONNEL_CAP');
+    }
+    return classes;
+  }, [classes, settings.schoolCategory]);
+
+  const [selectedClassId, setSelectedClassId] = useState<string>(() => availableClasses[0]?.id || classes[0]?.id || '');
+  const [selectedTerm, setSelectedTerm] = useState<EvaluationTerm>('EVALUATION_1');
+  const [activeStudentId, setActiveStudentId] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [studentSortMode, setStudentSortMode] = useState<'RANK' | 'ALPHA'>('RANK');
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [isPrintAllMode, setIsPrintAllMode] = useState<boolean>(false);
+  const [teacherComments, setTeacherComments] = useState<Record<string, string>>({});
+
+  // Synchronisation de la classe sélectionnée si la liste disponible change
+  useEffect(() => {
+    if (availableClasses.length > 0 && !availableClasses.some(c => c.id === selectedClassId)) {
+      setSelectedClassId(availableClasses[0].id);
+    }
+  }, [availableClasses, selectedClassId]);
+
+  // Active class & active student list
+  const currentClass = availableClasses.find(c => c.id === selectedClassId) || classes.find(c => c.id === selectedClassId);
+
+  // Périodes strictement adaptées : au Fondamental, masque les Trimestres et Semestres des autres cycles
+  const filteredTerms = useMemo(() => {
+    return getFilteredEvaluationTerms(
+      currentClass?.category,
+      settings.schoolCategory,
+      settings.evaluationMonths,
+      settings.evaluationCount
+    );
+  }, [currentClass?.category, settings.schoolCategory, settings.evaluationMonths, settings.evaluationCount]);
+
+  // Bascule automatique vers une période valide selon le cycle
+  useEffect(() => {
+    const isFondamental = 
+      currentClass?.category === 'FONDAMENTAL_1' || 
+      currentClass?.category === 'FONDAMENTAL_2' || 
+      settings.schoolCategory === 'ECOLE_FONDAMENTALE';
+
+    if (isFondamental) {
+      if (selectedTerm.startsWith('TRIMESTRE_') || selectedTerm.startsWith('SEMESTRE_')) {
+        setSelectedTerm('EVALUATION_1');
+      }
+    } else if (currentClass?.category === 'LYCEE' || settings.schoolCategory === 'LYCEE') {
+      if (!selectedTerm.startsWith('TRIMESTRE_')) {
+        setSelectedTerm('TRIMESTRE_1');
+      }
+    } else if (currentClass?.category === 'TECHNIQUE_BT' || currentClass?.category === 'PROFESSIONNEL_CAP' || settings.schoolCategory === 'PROFESSIONNEL') {
+      if (!selectedTerm.startsWith('SEMESTRE_')) {
+        setSelectedTerm('SEMESTRE_1');
+      }
+    }
+  }, [currentClass?.category, settings.schoolCategory, selectedTerm]);
+
+  const totalClassStudents = useMemo(() => {
+    return students.filter(s => s.classId === selectedClassId && s.status === 'ACTIF');
+  }, [students, selectedClassId]);
+
+  const classStudents = useMemo(() => {
+    const filtered = totalClassStudents.filter(s => {
+      // Search query filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const matchesName =
+          s.lastName.toLowerCase().includes(q) ||
+          s.firstName.toLowerCase().includes(q) ||
+          s.matricule.toLowerCase().includes(q);
+        if (!matchesName) return false;
+      }
+      return true;
+    });
+
+    if (studentSortMode === 'ALPHA') {
+      return [...filtered].sort((a, b) => a.lastName.localeCompare(b.lastName, 'fr') || a.firstName.localeCompare(b.firstName, 'fr'));
+    }
+
+    // Default: Élèves notés classés du 1er au dernier, puis élèves non notés par ordre alphabétique
+    return [...filtered].sort((a, b) => {
+      const cardA = generateReportCard(a.id, selectedTerm);
+      const cardB = generateReportCard(b.id, selectedTerm);
+      const gradedA = Boolean(cardA && cardA.totalCoefficients > 0);
+      const gradedB = Boolean(cardB && cardB.totalCoefficients > 0);
+      if (gradedA !== gradedB) return gradedA ? -1 : 1;
+      if (!gradedA && !gradedB) {
+        return a.lastName.localeCompare(b.lastName, 'fr') || a.firstName.localeCompare(b.firstName, 'fr');
+      }
+      const rankA = cardA ? cardA.rankInClass : 999;
+      const rankB = cardB ? cardB.rankInClass : 999;
+      if (rankA !== rankB) return rankA - rankB;
+      const avgA = cardA ? cardA.generalAverage : 0;
+      const avgB = cardB ? cardB.generalAverage : 0;
+      return avgB - avgA;
+    });
+  }, [totalClassStudents, searchQuery, selectedTerm, generateReportCard, studentSortMode, grades]);
+
+  // Ensure an active student is selected
+  const activeStudent = useMemo(() => {
+    return classStudents.find(s => s.id === activeStudentId) || classStudents[0] || null;
+  }, [classStudents, activeStudentId]);
+
+  // Track active student index for sequential grading (Élève précédent / Élève suivant)
+  const activeStudentIndex = useMemo(() => {
+    if (!activeStudent) return -1;
+    return classStudents.findIndex(s => s.id === activeStudent.id);
+  }, [classStudents, activeStudent]);
+
+  const hasPrevStudent = activeStudentIndex > 0;
+  const hasNextStudent = activeStudentIndex >= 0 && activeStudentIndex < classStudents.length - 1;
+
+  const handlePrevStudent = () => {
+    if (hasPrevStudent) {
+      setActiveStudentId(classStudents[activeStudentIndex - 1].id);
+    }
+  };
+
+  const handleNextStudent = () => {
+    if (hasNextStudent) {
+      setActiveStudentId(classStudents[activeStudentIndex + 1].id);
+    }
+  };
+
+  // Dynamic report card calculation for active student
+  const activeReportCard: ReportCard | null = useMemo(() => {
+    if (!activeStudent) return null;
+    return generateReportCard(activeStudent.id, selectedTerm);
+  }, [activeStudent, selectedTerm, generateReportCard, grades]);
+
+  // All report cards for the class (used for bulk printing/download)
+  // Strictement triés du 1er au dernier élève de la classe selon le rang officiel et la moyenne
+  const allClassReportCards: ReportCard[] = useMemo(() => {
+    const activeClassStudents = students.filter(s => s.classId === selectedClassId && s.status === 'ACTIF');
+    const cards = activeClassStudents
+      .map(s => generateReportCard(s.id, selectedTerm))
+      .filter((r): r is ReportCard => r !== null);
+
+    return cards.sort((a, b) => {
+      if (a.rankInClass !== b.rankInClass) {
+        return a.rankInClass - b.rankInClass;
+      }
+      return b.generalAverage - a.generalAverage;
+    });
+  }, [students, selectedClassId, selectedTerm, generateReportCard, grades]);
+
+  // Regroupement des bulletins par paires (1er & 2ème, 3ème & 4ème, ...) pour impression 2 par feuille A4 horizontale
+  const bulletinPairs = useMemo(() => {
+    const pairs: Array<[ReportCard, ReportCard | null]> = [];
+    for (let i = 0; i < allClassReportCards.length; i += 2) {
+      pairs.push([allClassReportCards[i], allClassReportCards[i + 1] || null]);
+    }
+    return pairs;
+  }, [allClassReportCards]);
+
+  // Direct grade update logic right inside bulletin
+  const handleClassScoreChange = (subjectId: string, val: string, targetStudentId?: string) => {
+    if (!canEditGrades) return;
+    const studentIdToUse = targetStudentId || activeStudent?.id;
+    const studentObj = students.find(s => s.id === studentIdToUse) || activeStudent;
+    if (!studentObj) return;
+
+    const isFirstCycle = currentClass?.category === 'FONDAMENTAL_1';
+    const maxScore = isFirstCycle ? 10 : 20;
+    const relatedTerms = getRelatedTermsForPeriod(selectedTerm, settings.evaluationCount || 9);
+
+    const exactClassGrades = grades.filter(
+      g => g.studentId === studentObj.id && g.subjectId === subjectId && g.term === selectedTerm && g.type !== 'COMPOSITION' && g.type !== 'EXAMEN'
+    );
+    const relatedClassGrades = exactClassGrades.length > 0
+      ? exactClassGrades
+      : grades.filter(
+          g => g.studentId === studentObj.id && g.subjectId === subjectId && relatedTerms.includes(g.term) && g.type !== 'COMPOSITION' && g.type !== 'EXAMEN'
+        );
+
+    // Si champ vidé : supprimer la note existante pour garder la case vide (ne pas forcer 0)
+    if (val.trim() === '') {
+      if (relatedClassGrades.length > 0) {
+        relatedClassGrades.forEach(g => deleteGrade(g.id));
+        setSavedNotice('Note de classe effacée');
+        setTimeout(() => setSavedNotice(null), 1500);
+      }
+      return;
+    }
+
+    let scoreNum = parseFloat(val);
+    if (isNaN(scoreNum)) return;
+    scoreNum = Math.min(maxScore, Math.max(0, scoreNum));
+
+    const subjectObj = subjects.find(sub => sub.id === subjectId);
+    const coef = (currentClass?.customCoefficients && currentClass.customCoefficients[subjectId] !== undefined)
+      ? currentClass.customCoefficients[subjectId]
+      : (subjectObj ? subjectObj.coefficient : 1);
+
+    if (exactClassGrades.length > 0) {
+      saveGrade({
+        ...exactClassGrades[0],
+        score: scoreNum,
+        maxScore,
+        coefficient: coef
+      });
+    } else {
+      saveGrade({
+        studentId: studentObj.id,
+        classId: studentObj.classId,
+        subjectId,
+        term: selectedTerm,
+        academicYear: settings.currentAcademicYear,
+        type: 'DEVOIR',
+        score: scoreNum,
+        maxScore,
+        coefficient: coef,
+        date: new Date().toISOString().split('T')[0]
+      });
+    }
+
+    setSavedNotice(`Note de classe enregistrée : ${scoreNum}/${maxScore}`);
+    setTimeout(() => setSavedNotice(null), 1800);
+  };
+
+  const handleCompositionScoreChange = (subjectId: string, val: string, targetStudentId?: string) => {
+    if (!canEditGrades) return;
+    const studentIdToUse = targetStudentId || activeStudent?.id;
+    const studentObj = students.find(s => s.id === studentIdToUse) || activeStudent;
+    if (!studentObj) return;
+
+    const isFirstCycle = currentClass?.category === 'FONDAMENTAL_1';
+    const maxCompScore = isFirstCycle ? 10 : 40;
+    const relatedTerms = getRelatedTermsForPeriod(selectedTerm, settings.evaluationCount || 9);
+
+    const exactCompGrades = grades.filter(
+      g => g.studentId === studentObj.id && g.subjectId === subjectId && g.term === selectedTerm && (g.type === 'COMPOSITION' || g.type === 'EXAMEN')
+    );
+    const relatedCompGrades = exactCompGrades.length > 0
+      ? exactCompGrades
+      : grades.filter(
+          g => g.studentId === studentObj.id && g.subjectId === subjectId && relatedTerms.includes(g.term) && (g.type === 'COMPOSITION' || g.type === 'EXAMEN')
+        );
+
+    // Si champ vidé : supprimer la note de composition existante
+    if (val.trim() === '') {
+      if (relatedCompGrades.length > 0) {
+        relatedCompGrades.forEach(g => deleteGrade(g.id));
+        setSavedNotice('Note de composition effacée');
+        setTimeout(() => setSavedNotice(null), 1500);
+      }
+      return;
+    }
+
+    let scoreNum = parseFloat(val);
+    if (isNaN(scoreNum)) return;
+    scoreNum = Math.min(maxCompScore, Math.max(0, scoreNum));
+
+    const subjectObj = subjects.find(sub => sub.id === subjectId);
+    const coef = (currentClass?.customCoefficients && currentClass.customCoefficients[subjectId] !== undefined)
+      ? currentClass.customCoefficients[subjectId]
+      : (subjectObj ? subjectObj.coefficient : 1);
+
+    if (exactCompGrades.length > 0) {
+      saveGrade({
+        ...exactCompGrades[0],
+        score: scoreNum,
+        maxScore: maxCompScore,
+        coefficient: coef
+      });
+    } else {
+      saveGrade({
+        studentId: studentObj.id,
+        classId: studentObj.classId,
+        subjectId,
+        term: selectedTerm,
+        academicYear: settings.currentAcademicYear,
+        type: 'COMPOSITION',
+        score: scoreNum,
+        maxScore: maxCompScore,
+        coefficient: coef,
+        date: new Date().toISOString().split('T')[0]
+      });
+    }
+
+    setSavedNotice(`Note de composition enregistrée : ${scoreNum}/${maxCompScore}`);
+    setTimeout(() => setSavedNotice(null), 1800);
+  };
+
+  // Direct comment update
+  const handleCommentChange = (studentId: string, comment: string) => {
+    const key = `${studentId}_${selectedTerm}`;
+    setTeacherComments(prev => ({ ...prev, [key]: comment }));
+  };
+
+  const getCommentForStudent = (studentId: string): string => {
+    const key = `${studentId}_${selectedTerm}`;
+    if (teacherComments[key] !== undefined) return teacherComments[key];
+    if (activeReportCard && activeReportCard.studentId === studentId) {
+      return activeReportCard.principalTeacherComment;
+    }
+    return 'Travail satisfaisant, continuez les efforts.';
+  };
+
+  // Browser print handlers with Popup fallback & iFrame support
+  const handlePrintSingle = () => {
+    setIsPrintAllMode(false);
+    setTimeout(() => {
+      triggerPrint(false);
+    }, 150);
+  };
+
+  const handlePrintClass = () => {
+    setIsPrintAllMode(true);
+    setTimeout(() => {
+      triggerPrint(true);
+    }, 250);
+  };
+
+  const triggerPrint = (isAll: boolean) => {
+    try {
+      window.print();
+    } catch (e) {
+      console.warn('Impression directe :', e);
+    } finally {
+      setTimeout(() => setIsPrintAllMode(false), 2000);
+    }
+  };
+
+  const handleDownloadPdf = () => {
+    if (activeReportCard) {
+      PdfService.generateReportCardPdf(activeReportCard, settings);
+    }
+  };
+
+  const handleDownloadAllClassPdfs = async () => {
+    if (allClassReportCards.length === 0) return;
+    await PdfService.generateClassReportCardsPdf(
+      allClassReportCards,
+      settings,
+      currentClass?.name || 'Classe'
+    );
+  };
+
+  // CSV Export for administrative records
+  const handleExportClassCsv = () => {
+    if (allClassReportCards.length === 0) return;
+    const headers = [
+      'Matricule',
+      'Nom & Prénoms',
+      'Classe',
+      'Trimestre',
+      'Moyenne Générale',
+      'Total Coeffs',
+      'Total Points',
+      'Rang',
+      'Mention / Décision'
+    ];
+
+    const rows = allClassReportCards.map(c => [
+      `"${c.studentMatricule || ''}"`,
+      `"${c.studentName.replace(/"/g, '""')}"`,
+      `"${c.className}"`,
+      `"${c.term}"`,
+      c.generalAverage.toFixed(2),
+      c.totalCoefficients,
+      c.totalPoints.toFixed(2),
+      c.rankInClass,
+      `"${(c.directorDecision || '').replace(/"/g, '""')}"`
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(';'), ...rows.map(r => r.join(';'))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `Recapitulatif_Notes_${(currentClass?.name || 'Classe').replace(/\s+/g, '_')}_${selectedTerm}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Class Level Performance Summary Metrics
+  const classStats = useMemo(() => {
+    if (allClassReportCards.length === 0) {
+      return { total: 0, passing: 0, failing: 0, passRate: 0, avg: 0, maxAvg: 0, minAvg: 0 };
+    }
+    const total = allClassReportCards.length;
+    let passing = 0;
+    let sumAvg = 0;
+    let maxAvg = 0;
+    let minAvg = 999;
+
+    allClassReportCards.forEach(card => {
+      const passThreshold = (card.maxScore || 20) === 10 ? 5 : 10;
+      if (card.generalAverage >= passThreshold) passing++;
+      sumAvg += card.generalAverage;
+      if (card.generalAverage > maxAvg) maxAvg = card.generalAverage;
+      if (card.generalAverage < minAvg) minAvg = card.generalAverage;
+    });
+
+    return {
+      total,
+      passing,
+      failing: total - passing,
+      passRate: Math.round((passing / total) * 100),
+      avg: sumAvg / total,
+      maxAvg,
+      minAvg: minAvg === 999 ? 0 : minAvg
+    };
+  }, [allClassReportCards]);
+
+  const COMMENT_PRESETS = [
+    "Très bon travail. Élève sérieux, assidu et appliqué.",
+    "Résultats satisfaisants. Poursuivez vos efforts.",
+    "Résultats encourageants mais travail irrégulier.",
+    "Des capacités non pleinement exploitées.",
+    "Travail insuffisant. Des efforts soutenus sont requis."
+  ];
+
+  return (
+    <div className="space-y-2 max-w-7xl mx-auto pb-4">
+      {/* ----------------- SCREEN ONLY HEADER & CONTROLS (ULTRA COMPACT) ----------------- */}
+      <div className="no-print space-y-2">
+        {/* Saved Toast Notification */}
+        {savedNotice && (
+          <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-2xs animate-fadeIn">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            <span>{savedNotice} — Re-calcul automatique effectué.</span>
+          </div>
+        )}
+
+        {/* Single Unified Ultra-Compact Header & Action Bar */}
+        <div className="bg-white px-3 py-2 rounded-xl border border-slate-200/90 shadow-2xs flex flex-wrap items-center justify-between gap-2 text-xs">
+          {/* Left: Title + Class & Period dropdowns + Inline Stats */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 font-bold text-slate-900 pr-1 shrink-0">
+              <FileText className="w-4 h-4 text-slate-700 shrink-0" />
+              <span>Bulletins</span>
+            </div>
+
+            {/* Classe selector */}
+            <div className="flex items-center gap-1 bg-slate-50 hover:bg-slate-100/70 border border-slate-200 rounded-lg px-2 py-1 transition-colors shrink-0">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Classe</span>
+              <select
+                value={selectedClassId}
+                onChange={e => {
+                  setSelectedClassId(e.target.value);
+                  setActiveStudentId('');
+                }}
+                className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[130px] sm:max-w-[180px] truncate"
+              >
+                {availableClasses.map(c => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.studentCount || 0})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Période selector (Strictement filtrée : masque les Trimestres et Semestres pour le Fondamental) */}
+            <div className="flex items-center gap-1 bg-slate-50 hover:bg-slate-100/70 border border-slate-200 rounded-lg px-2 py-1 transition-colors shrink-0">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Période</span>
+              <select
+                value={selectedTerm}
+                onChange={e => setSelectedTerm(e.target.value as EvaluationTerm)}
+                className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer max-w-[140px] sm:max-w-[200px] truncate"
+              >
+                {filteredTerms.monthlyTerms.length > 0 && (
+                  <optgroup label="Évaluations Mensuelles (Fondamental)">
+                    {filteredTerms.monthlyTerms.map(t => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {filteredTerms.trimesterTerms.length > 0 && (
+                  <optgroup label="Trimestres (Lycée)">
+                    {filteredTerms.trimesterTerms.map(t => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+                {filteredTerms.semesterTerms.length > 0 && (
+                  <optgroup label="Semestres (Technique / Professionnel)">
+                    {filteredTerms.semesterTerms.map(t => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </div>
+
+            {/* Inline Stats (Compact) */}
+            {classStats.total > 0 && (
+              <div className="hidden lg:flex items-center gap-2 pl-2 border-l border-slate-200 text-[11px] text-slate-500 font-medium shrink-0">
+                <span><strong className="text-slate-800">{classStats.total}</strong> élèves</span>
+                <span className="text-slate-300">·</span>
+                <span>Admis : <strong className="text-emerald-700">{classStats.passRate}%</strong></span>
+                <span className="text-slate-300">·</span>
+                <span>Moy : <strong className="text-slate-800 font-mono">{classStats.avg.toFixed(2)}/20</strong></span>
+              </div>
+            )}
+          </div>
+
+          {/* Right: Actions */}
+          <div className="flex items-center gap-1.5 ml-auto shrink-0">
+
+            <button
+              type="button"
+              onClick={handlePrintSingle}
+              disabled={!activeReportCard}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 text-white font-semibold text-xs rounded-lg shadow-2xs transition-colors cursor-pointer"
+              title="Imprimer le bulletin de l'élève affiché"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Imprimer</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrintClass}
+              disabled={allClassReportCards.length === 0}
+              className="inline-flex items-center gap-1 px-2.5 py-1 bg-blue-900 hover:bg-blue-800 disabled:opacity-40 text-white font-semibold text-xs rounded-lg shadow-2xs transition-colors cursor-pointer"
+              title="Imprimer tous les bulletins de la classe"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Tout imprimer ({allClassReportCards.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportClassCsv}
+              disabled={allClassReportCards.length === 0}
+              className="inline-flex items-center gap-1 px-2 py-1 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-slate-700 font-semibold text-xs rounded-lg border border-slate-200 transition-colors cursor-pointer"
+              title="Exporter les résultats en Excel / CSV"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              <span className="hidden sm:inline">Excel</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Main Interactive Screen Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-2.5 sm:gap-3">
+          {/* Left: Student List Sidebar */}
+          <div className="lg:col-span-4 bg-white border border-slate-200/80 rounded-xl p-2.5 sm:p-3 shadow-2xs space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-bold text-slate-700 truncate">
+                Élèves de la classe ({classStudents.length})
+              </h2>
+              <button
+                type="button"
+                onClick={() => setStudentSortMode(prev => prev === 'RANK' ? 'ALPHA' : 'RANK')}
+                className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
+                title="Changer l'ordre de tri"
+              >
+                {studentSortMode === 'RANK' ? 'Tri : 1er au dernier' : 'Tri : A à Z'}
+              </button>
+            </div>
+
+            {/* Quick Search bar */}
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Rechercher par nom ou matricule..."
+                className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 placeholder-slate-400 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 rounded-md bg-slate-200 hover:bg-slate-300 transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Student list */}
+            <div className="space-y-1.5 max-h-[580px] overflow-y-auto pr-1 custom-scrollbar">
+              {classStudents.map(std => {
+                const isSelected = activeStudent?.id === std.id;
+                const card = generateReportCard(std.id, selectedTerm);
+                const isGraded = Boolean(card && card.totalCoefficients > 0);
+                const avg = card ? card.generalAverage : 0;
+                const rank = isGraded && card ? card.rankInClass : null;
+                const cardMax = card?.maxScore || 20;
+                const passThreshold = cardMax === 10 ? 5 : 10;
+
+                return (
+                  <button
+                    key={std.id}
+                    onClick={() => setActiveStudentId(std.id)}
+                    className={`w-full text-left py-1.5 px-2 rounded-lg text-xs transition-colors flex items-center justify-between cursor-pointer border ${
+                      isSelected
+                        ? 'bg-blue-900 text-white border-blue-900 shadow-2xs font-bold'
+                        : 'bg-slate-50/80 text-slate-800 border-slate-200/70 hover:bg-slate-100 font-medium'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      {/* Clean rank badge */}
+                      <div className="shrink-0">
+                        {rank === 1 ? (
+                          <span className={`inline-flex items-center justify-center min-w-[24px] px-1 py-0.2 rounded font-bold text-[9px] ${
+                            isSelected ? 'bg-amber-400 text-slate-950' : 'bg-amber-100 text-amber-900 border border-amber-300'
+                          }`}>
+                            1er
+                          </span>
+                        ) : rank === 2 ? (
+                          <span className={`inline-flex items-center justify-center min-w-[24px] px-1 py-0.2 rounded font-bold text-[9px] ${
+                            isSelected ? 'bg-slate-700 text-slate-100' : 'bg-slate-200 text-slate-800 border border-slate-300'
+                          }`}>
+                            2e
+                          </span>
+                        ) : rank === 3 ? (
+                          <span className={`inline-flex items-center justify-center min-w-[24px] px-1 py-0.2 rounded font-bold text-[9px] ${
+                            isSelected ? 'bg-amber-800 text-amber-100' : 'bg-amber-50 text-amber-800 border border-amber-300'
+                          }`}>
+                            3e
+                          </span>
+                        ) : rank !== null ? (
+                          <span className={`inline-flex items-center justify-center min-w-[24px] px-1 py-0.2 rounded font-semibold text-[9px] ${
+                            isSelected ? 'bg-slate-800 text-slate-300' : 'bg-slate-100 text-slate-600 border border-slate-200'
+                          }`}>
+                            {rank}e
+                          </span>
+                        ) : (
+                          <span className={`inline-flex items-center justify-center min-w-[24px] px-1 py-0.2 rounded font-semibold text-[9px] ${
+                            isSelected ? 'bg-blue-800 text-blue-200' : 'bg-slate-100 text-slate-400 border border-slate-200'
+                          }`}>
+                            —
+                          </span>
+                        )}
+                      </div>
+
+                      {std.photoUrl ? (
+                        <img
+                          src={std.photoUrl}
+                          alt={std.firstName}
+                          className="w-6 h-6 rounded-md object-cover border border-white/20 shrink-0"
+                        />
+                      ) : (
+                        <div
+                          className={`w-6 h-6 rounded-md font-bold flex items-center justify-center text-[9px] shrink-0 ${
+                            isSelected ? 'bg-slate-800 text-white' : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {std.firstName.charAt(0)}{std.lastName.charAt(0)}
+                        </div>
+                      )}
+
+                      <div className="min-w-0">
+                        <p className="truncate font-semibold text-xs leading-tight">{std.lastName} {std.firstName}</p>
+                        <p className={`text-[10px] ${isSelected ? 'text-slate-300' : 'text-slate-400'} font-mono leading-tight`}>
+                          {std.matricule}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0 ml-1.5">
+                      {isGraded ? (
+                        <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-bold font-mono ${
+                          isSelected ? 'bg-white/20 text-white' : avg >= passThreshold ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                        }`}>
+                          {avg.toFixed(2)}
+                        </span>
+                      ) : (
+                        <span className={`inline-block px-1.5 py-0.2 rounded text-[10px] font-semibold ${
+                          isSelected ? 'bg-white/15 text-slate-200' : 'bg-slate-100 text-slate-400'
+                        }`}>
+                          —
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+
+              {classStudents.length === 0 && (
+                <div className="text-center py-8 space-y-2">
+                  <p className="text-xs text-slate-400 italic">Aucun élève trouvé pour cette recherche.</p>
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="text-xs font-semibold text-slate-700 underline hover:text-slate-900 cursor-pointer"
+                    >
+                      Effacer la recherche
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right: Interactive Bulletin Card View & Direct Grade Inputs */}
+          <div className="lg:col-span-8 bg-white border border-slate-200/80 rounded-xl p-3 sm:p-4 shadow-2xs">
+            {!activeReportCard || !activeStudent ? (
+              <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs py-12 space-y-2">
+                <FileText className="w-10 h-10 text-slate-300 stroke-1" />
+                <p className="font-medium">Sélectionnez un élève dans la liste à gauche pour saisir ses notes et afficher son bulletin.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {/* Barre Unifiée Ultra-Compacte : Navigation & En-tête de Bulletin */}
+                <div className="bg-slate-900 text-white px-3 py-2 rounded-xl border border-slate-800 shadow-2xs space-y-1.5 text-xs">
+                  {/* Ligne 1 : Stepper Navigation + Identité Élève + Moyenne & Rang */}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {/* Stepper rapide */}
+                      <div className="flex items-center bg-slate-800 rounded-lg p-0.5 border border-slate-700/80 shrink-0">
+                        <button
+                          type="button"
+                          onClick={handlePrevStudent}
+                          disabled={!hasPrevStudent}
+                          className="p-1 rounded-md hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                          title="Élève précédent"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="text-[10px] font-mono font-bold text-slate-300 px-1.5">
+                          {activeStudentIndex + 1}/{classStudents.length}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleNextStudent}
+                          disabled={!hasNextStudent}
+                          className="p-1 rounded-md hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed text-white transition-colors cursor-pointer"
+                          title="Élève suivant"
+                        >
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      {/* Identité Élève */}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 truncate">
+                          <h2 className="font-bold text-white text-xs sm:text-sm tracking-wide truncate">
+                            {activeReportCard.studentName}
+                          </h2>
+                          <span className="text-[10px] text-amber-300 font-mono shrink-0">
+                            ({activeReportCard.className})
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-slate-400 font-mono block leading-tight">
+                          Matricule : {activeReportCard.studentMatricule || '---'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Moyenne & Rang */}
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="text-right">
+                        <div className="flex items-baseline gap-1 justify-end">
+                          <span className="text-sm sm:text-base font-bold font-mono text-amber-300">
+                            {activeReportCard.generalAverage.toFixed(2)}
+                          </span>
+                          <span className="text-[10px] text-slate-400">/ {activeReportCard.maxScore || 20}</span>
+                        </div>
+                        <span className="text-[10px] font-semibold text-emerald-400 block leading-tight">
+                          Rang : {activeReportCard.rankInClass}{activeReportCard.rankInClass === 1 ? 'er' : 'e'} / {activeReportCard.totalClassStudents}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Ligne 2 : Ruban de Métriques & Formule en 1 ligne */}
+                  <div className="pt-1.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-300">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span>Points : <strong className="text-white font-mono">{activeReportCard.totalPoints.toFixed(2)}</strong></span>
+                      <span aria-hidden="true" className="text-slate-600">·</span>
+                      <span>Coefs : <strong className="text-white font-mono">{activeReportCard.totalCoefficients}</strong></span>
+                      <span aria-hidden="true" className="text-slate-600">·</span>
+                      <span>Moy. Classe : <strong className="text-white font-mono">{activeReportCard.classOverallAverage.toFixed(2)}</strong></span>
+                      <span aria-hidden="true" className="text-slate-600">·</span>
+                      <span>Mention : <strong className="text-emerald-400">{activeReportCard.directorDecision}</strong></span>
+                    </div>
+
+                    <span className="text-[9px] text-slate-400 italic">
+                      {activeReportCard.maxScore === 10
+                        ? 'Formule : (N.Classe + Compos) / 2'
+                        : 'Formule : (N.Classe + Compos) / 3'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Interactive Grade Table with Direct Input */}
+                <div className="border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-100 font-bold text-[10px] uppercase tracking-wider text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th className="py-2 px-3">Matières</th>
+                          <th className="py-3 px-2 text-center w-32">
+                            N.Classe /{activeReportCard.maxScore === 10 ? 10 : 20}
+                          </th>
+                          <th className="py-3 px-2 text-center w-32">
+                            Compos /{activeReportCard.maxScore === 10 ? 10 : 40}
+                          </th>
+                          <th className="py-3 px-2 text-center w-28">Moyenne /{activeReportCard.maxScore}</th>
+                          <th className="py-3 px-2 text-center w-16">Coeff.</th>
+                          <th className="py-3 px-2 text-center w-24">Moy. Coeff</th>
+                          <th className="py-3 px-4">Appréciations</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-xs font-bold text-slate-800 divide-y divide-slate-100 bg-white">
+                        {activeReportCard.subjectAverages.map((s) => {
+                          const sMaxScore = s.maxScore || activeReportCard.maxScore || 20;
+                          const hasFinal = s.hasGrades ?? (s.classScore !== undefined || s.compositionScore !== undefined);
+                          const { appreciation } = getMaliScoreAppreciation(s.finalScore, sMaxScore);
+                          const classScoreVal = s.classScore !== undefined ? String(s.classScore) : '';
+                          const compScoreVal = s.compositionScore !== undefined ? String(s.compositionScore) : '';
+
+                          return (
+                            <tr key={s.subjectId} className="hover:bg-slate-50/80 transition-colors">
+                              <td className="py-3 px-4">
+                                <p className="font-black text-slate-900">{s.subjectName}</p>
+                                <p className="text-[10px] font-mono text-slate-400">{s.subjectCode}</p>
+                              </td>
+
+                              {/* Direct Note de classe input */}
+                              <td className="py-2 px-2 text-center">
+                                <input
+                                  type="number"
+                                  step="0.25"
+                                  min="0"
+                                  max={activeReportCard.maxScore === 10 ? 10 : 20}
+                                  value={classScoreVal}
+                                  placeholder="—"
+                                  disabled={!canEditGrades}
+                                  onChange={e => handleClassScoreChange(s.subjectId, e.target.value)}
+                                  className="w-20 py-1 px-2 text-center font-mono font-bold text-xs bg-slate-50 border border-slate-200 focus:border-slate-900 focus:bg-white disabled:opacity-70 disabled:cursor-not-allowed rounded-lg outline-none transition-all placeholder:text-slate-300"
+                                  title="Note de classe / devoirs"
+                                />
+                              </td>
+
+                              {/* Direct Note de composition input */}
+                              <td className="py-2 px-2 text-center">
+                                <input
+                                  type="number"
+                                  step="0.25"
+                                  min="0"
+                                  max={activeReportCard.maxScore === 10 ? 10 : 40}
+                                  value={compScoreVal}
+                                  placeholder="—"
+                                  disabled={!canEditGrades}
+                                  onChange={e => handleCompositionScoreChange(s.subjectId, e.target.value)}
+                                  className="w-20 py-1 px-2 text-center font-mono font-bold text-xs bg-slate-50 border border-slate-200 focus:border-slate-900 focus:bg-white disabled:opacity-70 disabled:cursor-not-allowed rounded-lg outline-none transition-all placeholder:text-slate-300"
+                                  title="Note de composition"
+                                />
+                              </td>
+
+                              {/* Calculated Moyenne Matière */}
+                              <td className="py-2 px-2 text-center">
+                                <span className={`font-mono font-bold text-xs ${hasFinal ? 'text-slate-900' : 'text-slate-300'}`}>
+                                  {hasFinal ? s.finalScore.toFixed(2) : '—'}
+                                </span>
+                              </td>
+
+                              <td className="py-2.5 px-2 text-center font-semibold text-slate-600">
+                                {s.coefficient}
+                              </td>
+
+                              <td className={`py-2.5 px-2 text-center font-mono font-bold ${hasFinal ? 'text-slate-900' : 'text-slate-300'}`}>
+                                {hasFinal ? s.weightedScore.toFixed(2) : '—'}
+                              </td>
+
+                              <td className="py-2.5 px-4">
+                                <span className={`text-xs font-medium ${hasFinal ? 'text-slate-700' : 'text-slate-400 italic'}`}>
+                                  {hasFinal ? appreciation : 'Non noté'}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                {/* Editable Teacher Observation & Conseil de Classe */}
+                <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200/90 space-y-1.5">
+                  <label className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
+                    Appréciation générale du Conseil de Classe
+                  </label>
+
+                  <textarea
+                    rows={2}
+                    value={getCommentForStudent(activeStudent.id)}
+                    onChange={e => handleCommentChange(activeStudent.id, e.target.value)}
+                    placeholder="Saisissez l'observation du conseil..."
+                    className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-medium text-slate-800 outline-none focus:border-slate-400"
+                  />
+
+                  {/* Preset Quick suggestions */}
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                    <span className="text-[11px] text-slate-400 font-medium">Suggestions :</span>
+                    {COMMENT_PRESETS.map((preset, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleCommentChange(activeStudent.id, preset)}
+                        className="text-[11px] px-2 py-0.5 bg-white hover:bg-slate-100 text-slate-600 rounded-md border border-slate-200 transition-colors cursor-pointer"
+                      >
+                        {preset.split('.')[0]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ----------------- OFFICIAL PRINTABLE DOCUMENT (2 BULLETINS PER HORIZONTAL A4 SHEET) ----------------- */}
+      <div className="print-only" id="printable-bulletins-container">
+        {isPrintAllMode ? (
+          /* Impression groupée : 2 bulletins côte à côte par feuille A4 horizontale dans l'ordre du classement (1er+2e, 3e+4e...) */
+          <div>
+            {bulletinPairs.map(([leftCard, rightCard], pairIdx) => (
+              <div
+                key={leftCard.studentId}
+                className={`bulletin-pair-sheet w-[288mm] h-[199mm] mx-auto bg-white grid grid-cols-2 gap-[5mm] ${
+                  pairIdx < bulletinPairs.length - 1 ? 'page-break' : ''
+                }`}
+              >
+                <div className="bulletin-half-slot h-[199mm] flex flex-col">
+                  <PrintableBulletin
+                    report={leftCard}
+                    settings={settings}
+                    comment={getCommentForStudent(leftCard.studentId)}
+                  />
+                </div>
+                <div className="bulletin-half-slot h-[199mm] flex flex-col">
+                  {rightCard && (
+                    <PrintableBulletin
+                      report={rightCard}
+                      settings={settings}
+                      comment={getCommentForStudent(rightCard.studentId)}
+                    />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          /* Impression d'un bulletin individuel sur demi-feuille A4 horizontale */
+          activeReportCard && (
+            <div className="bulletin-pair-sheet w-[288mm] h-[199mm] mx-auto bg-white grid grid-cols-2 gap-[5mm]">
+              <div className="bulletin-half-slot h-[199mm] flex flex-col">
+                <PrintableBulletin
+                  report={activeReportCard}
+                  settings={settings}
+                  comment={getCommentForStudent(activeReportCard.studentId)}
+                />
+              </div>
+              <div className="bulletin-half-slot h-[199mm] flex flex-col" />
+            </div>
+          )
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* -------------------------------------------------------------------------- */
+/* PRINTABLE BULLETIN COMPONENT (2-UP HORIZONTAL A4 HALF-SHEET MALI FORMAT)   */
+/* -------------------------------------------------------------------------- */
+
+interface PrintableBulletinProps {
+  report: ReportCard;
+  settings: any;
+  comment: string;
+}
+
+const PrintableBulletin: React.FC<PrintableBulletinProps> = ({ report, settings, comment }) => {
+  const termFormatted = getTermLabel(report.term, settings?.evaluationMonths);
+  const maxScore = report.maxScore || 20;
+
+  return (
+    <div className="w-full bg-white text-slate-900 font-sans text-[8px] leading-tight p-2 border-2 border-slate-900 flex flex-col justify-between h-full box-border">
+      
+      {/* 1. TOP HEADER SECTION */}
+      <div className="text-center space-y-0.5 border-b-2 border-slate-900 pb-1">
+        <p className="font-bold uppercase text-[8px] tracking-tight truncate">
+          {settings.academyName || "ACADEMIE D'ENSEIGNEMENT BAMAKO RIVE DROITE"} {settings.capName ? `CAP DE ${settings.capName}` : "CAP DE FALADIE"} {settings.schoolName || "ECOLE PRIVEE LE BIRGO NIAMAKORO"}
+        </p>
+        <p className="font-bold text-[8px] text-slate-700">
+          TEL: {settings.phone || '76041281 / 75167282'}
+        </p>
+        <h1 className="font-black text-xs uppercase tracking-widest mt-0.5 underline">
+          BULLETIN DE NOTES
+        </h1>
+      </div>
+
+      {/* 2. TOP 3-BOX GRID */}
+      <div className="grid grid-cols-12 gap-1 my-1 text-[8px]">
+        {/* Left Box */}
+        <div className="col-span-5 border border-slate-900 p-1.5 flex flex-col justify-center space-y-0.5 min-w-0">
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="font-bold text-slate-700 shrink-0">ELEVE :</span>
+            <span className="font-black uppercase text-[9px] text-slate-900 truncate">{report.studentName}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="font-bold text-slate-700 shrink-0">N° Mle :</span>
+            <span className="font-mono font-bold text-slate-900 truncate">{report.studentMatricule || '---'}</span>
+          </div>
+          <div className="flex items-center gap-1 min-w-0">
+            <span className="font-bold text-slate-700 shrink-0">CLASSE :</span>
+            <span className="font-black text-slate-900 uppercase truncate">{report.className}</span>
+          </div>
+        </div>
+
+        {/* Center Box: Large Class Badge */}
+        <div className="col-span-3 border border-slate-900 p-1 flex items-center justify-center text-center bg-slate-50 relative overflow-hidden">
+          <div className="border border-slate-300 p-1 w-full h-full flex items-center justify-center">
+            <span className="font-black text-xs uppercase tracking-tight text-slate-900 leading-tight">{report.className}</span>
+          </div>
+        </div>
+
+        {/* Right Box */}
+        <div className="col-span-4 border border-slate-900 p-1.5 flex flex-col justify-center space-y-0.5 text-right min-w-0">
+          <div className="flex justify-between items-center gap-1">
+            <span className="font-bold text-slate-700">Année :</span>
+            <span className="font-bold text-slate-900">{report.academicYear}</span>
+          </div>
+          <div className="font-black uppercase text-blue-950 text-[8.5px] text-center border-y border-slate-300 py-0.5 truncate">
+            {termFormatted}
+          </div>
+          <div className="flex justify-between items-center text-[7.5px]">
+            <span className="font-bold text-slate-700">Effectif :</span>
+            <span className="font-black text-slate-900">{report.totalClassStudents} élèves</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. MAIN GRADES TABLE */}
+      <div className="flex-1 my-0.5">
+        <table className="w-full border-collapse border border-slate-900 text-center text-[7.5px]">
+          <thead>
+            <tr className="bg-slate-100 font-black text-[7px] uppercase tracking-tight text-slate-900 border-b border-slate-900">
+              <th className="border-r border-slate-900 p-0.5 text-left w-[30%]">MATIERES</th>
+              <th className="border-r border-slate-900 p-0.5 w-[7%]">COEF</th>
+              <th className="border-r border-slate-900 p-0.5 w-[14%]">
+                {maxScore === 10 ? 'N.CLASSE /10' : 'N.CLASSE /20'}
+              </th>
+              <th className="border-r border-slate-900 p-0.5 w-[14%]">
+                {maxScore === 10 ? 'COMPOS /10' : 'COMPOS /40'}
+              </th>
+              <th className="border-r border-slate-900 p-0.5 w-[10%]">MOY GEN</th>
+              <th className="border-r border-slate-900 p-0.5 w-[11%]">N.COEF</th>
+              <th className="p-0.5 text-left w-[14%]">APPRECIATIONS</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-900 font-semibold text-slate-900">
+            {report.subjectAverages.map((sub) => {
+              const hasGrades = sub.hasGrades ?? (sub.classScore !== undefined || sub.compositionScore !== undefined);
+              const { appreciation } = getMaliScoreAppreciation(sub.finalScore, maxScore);
+
+              return (
+                <tr key={sub.subjectId} className="h-4">
+                  <td className="border-r border-slate-900 px-1 py-0.5 text-left font-bold uppercase truncate max-w-[100px]">
+                    {sub.subjectName}
+                  </td>
+                  <td className="border-r border-slate-900 px-0.5 py-0.5 font-bold">
+                    {sub.coefficient}
+                  </td>
+                  <td className="border-r border-slate-900 px-0.5 py-0.5 font-mono">
+                    {sub.classScore !== undefined ? sub.classScore.toFixed(2).replace('.', ',') : ''}
+                  </td>
+                  <td className="border-r border-slate-900 px-0.5 py-0.5 font-mono">
+                    {sub.compositionScore !== undefined ? sub.compositionScore.toFixed(2).replace('.', ',') : ''}
+                  </td>
+                  <td className="border-r border-slate-900 px-0.5 py-0.5 font-mono font-black">
+                    {hasGrades ? sub.finalScore.toFixed(2).replace('.', ',') : ''}
+                  </td>
+                  <td className="border-r border-slate-900 px-0.5 py-0.5 font-mono font-bold">
+                    {hasGrades ? sub.weightedScore.toFixed(2).replace('.', ',') : ''}
+                  </td>
+                  <td className="px-1 py-0.5 text-left text-[7px] font-bold uppercase truncate max-w-[65px]">
+                    {hasGrades ? (sub.appreciation || appreciation.toUpperCase()) : ''}
+                  </td>
+                </tr>
+              );
+            })}
+
+            {/* TOTAL COEFFICIENTS ROW */}
+            <tr className="border-t border-slate-900 font-black h-4">
+              <td className="border-r border-slate-900 px-1 py-0.5 text-left uppercase text-[7px]">
+                TOTAL DES COEFFICIENTS
+              </td>
+              <td className="border-r border-slate-900 px-0.5 py-0.5 font-black text-center">
+                {report.totalCoefficients}
+              </td>
+              <td className="border-r border-slate-900" colSpan={5}></td>
+            </tr>
+
+            {/* TOTAL NOTES COEFFICIEES ROW */}
+            <tr className="border-t border-slate-900 font-black h-4">
+              <td className="border-r border-slate-900 px-1 py-0.5 text-left uppercase text-[7px]" colSpan={5}>
+                TOTAL DES NOTES COEFFICIEES
+              </td>
+              <td className="border-r border-slate-900 px-0.5 py-0.5 font-mono font-black text-center">
+                {report.totalPoints.toFixed(2).replace('.', ',')}
+              </td>
+              <td className="px-0.5 py-0.5"></td>
+            </tr>
+
+            {/* MOYENNE & RANG ROW */}
+            <tr className="border-t-2 border-slate-900 font-black bg-slate-50 h-5">
+              <td className="border-r border-slate-900 px-1.5 py-1 text-left uppercase" colSpan={3}>
+                MOYENNE : <span className="font-mono text-[9.5px] ml-1">{report.totalCoefficients > 0 ? report.generalAverage.toFixed(2).replace('.', ',') : '—'}</span>
+              </td>
+              <td className="border-r border-slate-900 px-1.5 py-1 text-center uppercase" colSpan={4}>
+                RANG : <span className="font-mono text-[9.5px] ml-1">{report.totalCoefficients > 0 ? `${report.rankInClass}${report.rankInClass === 1 ? 'er' : 'e'} / ${report.totalClassStudents}` : '—'}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* 4. BOTTOM APPRECIATION & SIGNATURE BLOCK */}
+      <div className="border border-slate-900 p-1.5 space-y-1 my-0.5 text-[7.5px]">
+        <div className="flex items-baseline justify-between border-b border-dashed border-slate-400 pb-0.5">
+          <span className="font-bold text-slate-800 uppercase">Appréciation du Directeur :</span>
+          <span className="font-black text-[8.5px] uppercase tracking-wider text-slate-900">
+            {comment || (report.totalCoefficients === 0 ? '' : (report.generalAverage >= 14 ? 'BIEN - FELICITATIONS' : report.generalAverage >= 10 ? 'PASSABLE - SATISFAISANT' : report.generalAverage >= 8 ? 'INSUFFISANT' : 'MEDIOCRE'))}
+          </span>
+        </div>
+
+        <div className="flex justify-between items-end pt-0.5 font-bold">
+          <div>
+            <span>{settings.city || 'Bamako'} le </span>
+            <span className="font-mono">..../..../{new Date().getFullYear()}</span>
+          </div>
+          <div className="text-right pr-2 relative">
+            <span className="uppercase text-[8px] font-black block">Le Directeur</span>
+            {settings.stampUrl ? (
+              <img src={settings.stampUrl} alt="Cachet et Signature" className="h-8 max-w-[75px] object-contain ml-auto my-0.5" />
+            ) : (
+              <div className="h-5"></div>
+            )}
+          </div>
+        </div>
+      </div>
+
+    </div>
+  );
+};
