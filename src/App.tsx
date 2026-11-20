@@ -223,6 +223,7 @@ export function AppContent() {
         setIsCollapsed={setIsSidebarCollapsed}
         isMobileOpen={isMobileMenuOpen}
         setIsMobileOpen={setIsMobileMenuOpen}
+        onLock={handleLockApp}
       />
 
       {/* Main Content Viewport */}
